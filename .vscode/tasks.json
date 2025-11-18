@@ -1,0 +1,18 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build PokeBuddy",
+      "type": "shell",
+      "command": "g++",
+      "args": [
+        "-municode",
+        "-lgdiplus",
+        "main.cpp",
+        "-o",
+        "PokeBuddy.exe"
+      ],
+      "group": { "kind": "build", "isDefault": true }
+    }
+  ]
+}
