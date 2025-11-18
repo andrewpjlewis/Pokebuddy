@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <ctime>
+#include <map>
 
 using namespace Gdiplus;
 using json = nlohmann::json;
@@ -24,7 +25,6 @@ struct PokemonGIF {
     int frameCount;
     int currentFrame;
     REAL width, height;
-    std::string name;
 };
 
 struct BulbasaurSet {
@@ -33,7 +33,8 @@ struct BulbasaurSet {
     PokemonGIF sleepLeft, sleepRight;
     PokemonGIF wakeLeft, wakeRight;
     PokemonGIF tripLeft, tripRight;
-    PokemonGIF pullUp;
+    PokemonGIF findItem;
+    PokemonGIF eat;
     PokemonGIF* current = nullptr;
 };
 
@@ -42,8 +43,9 @@ enum PetState {
     STATE_WALK,
     STATE_SLEEP,
     STATE_WAKE,
-    STATE_PULLUP,
-    STATE_TRIP
+    STATE_TRIP,
+    STATE_FINDITEM,
+    STATE_EAT
 };
 
 std::string selectedPokemon = "bulbasaur";
@@ -57,20 +59,28 @@ bool exploreMode = false;
 
 int behaviorTimer = 0;
 DWORD lastInteraction = 0;
-DWORD sleepTimeout = 0.25 * 60 * 1000; // 15 seconds
+DWORD sleepTimeout = 0.25 * 60 * 1000;
 int moveSpeed = 8;
-int nudgeDistance = 50; // pixels to move on left-click
-UINT baseTimerSpeed = 16; // smooth
+int nudgeDistance = 50;
+UINT baseTimerSpeed = 16;
 
 DWORD lastAnimationTime = 0;
 UINT animIntervalIdle = 250;
 UINT animIntervalWalk = 150;
 UINT animIntervalSleep = 800;
 UINT animIntervalWake = 150;
-UINT animIntervalTrip = 200;
+UINT animIntervalFindItem = 250; // faster find-item animation
+UINT animIntervalEat = 200;
 
 PetState currentState = STATE_IDLE;
 PetState previousState = STATE_IDLE;
+
+std::map<std::string, int> bag;
+std::string selectedItemForFeeding = "";
+Image* cursorImage = nullptr;
+
+HWND hwndCursorOverlay = NULL;
+bool cursorVisible = false;
 
 PokemonGIF loadGifSafe(std::wstring path) {
     PokemonGIF pg{};
@@ -95,7 +105,7 @@ bool advanceFrame(PokemonGIF& pg) {
 }
 
 void loadBulbasaur() {
-    std::wstring base = L"assets\\";
+    std::wstring base = L"assets\\bulbasaur\\";
     bulbasaur.idle       = loadGifSafe(base + L"bulbasaur-idle.gif");
     bulbasaur.walkLeft   = loadGifSafe(base + L"bulbasaur-walk-left.gif");
     bulbasaur.walkRight  = loadGifSafe(base + L"bulbasaur-walk-right.gif");
@@ -105,8 +115,9 @@ void loadBulbasaur() {
     bulbasaur.wakeRight  = loadGifSafe(base + L"bulbasaur-wake-right.gif");
     bulbasaur.tripLeft   = loadGifSafe(base + L"bulbasaur-trip-left.gif");
     bulbasaur.tripRight  = loadGifSafe(base + L"bulbasaur-trip-right.gif");
-    bulbasaur.pullUp     = loadGifSafe(base + L"bulbasaur-pull-up.gif");
-    bulbasaur.current    = &bulbasaur.idle;
+    bulbasaur.findItem   = loadGifSafe(base + L"bulbasaur-finditem.gif");
+    bulbasaur.eat        = loadGifSafe(base + L"bulbasaur-eat.gif");
+    bulbasaur.current = &bulbasaur.idle;
 }
 
 void loadData() {
@@ -116,6 +127,10 @@ void loadData() {
         if (j.contains("posX")) petPosition.x = j["posX"];
         if (j.contains("posY")) petPosition.y = j["posY"];
         if (j.contains("exploreMode")) exploreMode = j["exploreMode"];
+        if (j.contains("bag")) {
+            for (auto it = j["bag"].begin(); it != j["bag"].end(); ++it)
+                bag[it.key()] = it.value();
+        }
     }
 }
 
@@ -125,40 +140,157 @@ void saveData() {
     j["posX"] = petPosition.x;
     j["posY"] = petPosition.y;
     j["exploreMode"] = exploreMode;
+    j["bag"] = json::object();
+    for (auto it = bag.begin(); it != bag.end(); ++it)
+        j["bag"][it->first] = it->second;
     std::ofstream f("data.json"); f << j.dump(4);
+}
+
+std::wstring humanizeItem(std::string key) {
+    std::wstring s(key.begin(), key.end());
+    for (auto& c : s) if (c == '-') c = ' ';
+    if (!s.empty()) s[0] = towupper(s[0]);
+    return s;
+}
+
+void CreateCursorOverlay(HINSTANCE hInst) {
+    WNDCLASS wc{};
+    wc.lpfnWndProc = DefWindowProc;
+    wc.hInstance = hInst;
+    wc.lpszClassName = L"CursorOverlay";
+    RegisterClass(&wc);
+
+    hwndCursorOverlay = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        L"CursorOverlay", L"BerryOverlay",
+        WS_POPUP,
+        0, 0, 64, 64,
+        NULL, NULL, hInst, NULL
+    );
+    ShowWindow(hwndCursorOverlay, SW_HIDE);
+}
+
+void renderCursorOverlay() {
+    if (!cursorImage || !cursorVisible) return;
+
+    POINT cursor;
+    GetCursorPos(&cursor);
+
+    int width = cursorImage->GetWidth();
+    int height = cursorImage->GetHeight();
+
+    int offsetX = 16; // offset near cursor
+    int offsetY = 16;
+
+    HDC screen = GetDC(NULL);
+    HDC mem = CreateCompatibleDC(screen);
+    HBITMAP bmp = CreateCompatibleBitmap(screen, width, height);
+    HGDIOBJ oldBmp = SelectObject(mem, bmp);
+
+    Graphics g(mem);
+    g.Clear(Color(0, 0, 0, 0));
+    g.DrawImage(cursorImage, (REAL)offsetX, (REAL)offsetY, (REAL)width, (REAL)height);
+
+    BLENDFUNCTION blend{};
+    blend.BlendOp = AC_SRC_OVER;
+    blend.SourceConstantAlpha = 255;
+    blend.AlphaFormat = AC_SRC_ALPHA;
+
+    SIZE size = { width, height };
+    POINT ptSrc = { 0, 0 };
+    POINT ptDest = { cursor.x, cursor.y };
+
+    UpdateLayeredWindow(hwndCursorOverlay, screen, &ptDest, &size, mem, &ptSrc, 0, &blend, ULW_ALPHA);
+    ShowWindow(hwndCursorOverlay, SW_SHOW);
+
+    SelectObject(mem, oldBmp);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(NULL, screen);
 }
 
 void ShowRightClickMenu(HWND hwnd) {
     HMENU hMenu = CreatePopupMenu();
+    HMENU hBagMenu = CreatePopupMenu();
+
     AppendMenu(hMenu, MF_STRING, 1, exploreMode ? L"Disable Explore Mode" : L"Enable Explore Mode");
-    AppendMenu(hMenu, MF_STRING, 2, L"Feed");
-    AppendMenu(hMenu, MF_STRING, 3, L"Heal");
-    AppendMenu(hMenu, MF_STRING, 4, L"Switch Pokemon");
-    AppendMenu(hMenu, MF_STRING, 5, L"Find Bulbasaur");
+    AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hBagMenu, L"Bag");
+
+    int id = 100;
+    for (auto it = bag.begin(); it != bag.end(); ++it) {
+        std::wstring label = humanizeItem(it->first) + L" x " + std::to_wstring(it->second);
+        AppendMenu(hBagMenu, MF_STRING, id++, label.c_str());
+    }
+
     AppendMenu(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenu(hMenu, MF_STRING, 6, L"Return to Pokeball");
+    AppendMenu(hMenu, MF_STRING, 5, L"Return to Pokeball");
 
     POINT cursor;
     GetCursorPos(&cursor);
     SetForegroundWindow(hwnd);
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_TOPALIGN | TPM_LEFTALIGN,
-                             cursor.x, cursor.y, 0, hwnd, NULL);
+        cursor.x, cursor.y, 0, hwnd, NULL);
 
-    switch (cmd) {
-        case 1: exploreMode = !exploreMode; break;
-        case 2: MessageBox(hwnd, L"You fed your Pokemon!", L"Feed", MB_OK); break;
-        case 3: MessageBox(hwnd, L"Your Pokemon is healed!", L"Heal", MB_OK); break;
-        case 4: MessageBox(hwnd, L"Switching Pokemon...", L"Switch Pokemon", MB_OK); break;
-        case 5:
-            petPosition.x = GetSystemMetrics(SM_CXSCREEN) - (int)bulbasaur.current->width - 200;
-            movingRight = false;
-            MessageBox(hwnd, L"Bulbasaur found!", L"Find Bulbasaur", MB_OK);
-            break;
-        case 6: PostQuitMessage(0); break;
-    }
+    if (cmd == 1) exploreMode = !exploreMode;
+    else if (cmd >= 100) {
+        int idx = cmd - 100;
+        int i = 0;
+        for (auto it = bag.begin(); it != bag.end(); ++it, ++i) {
+            if (i == idx) {
+                if (it->second > 0) {
+                    selectedItemForFeeding = it->first;
+                    std::wstring berryPath = L"assets\\berries\\" + std::wstring(it->first.begin(), it->first.end()) + L".png";
+                    if (cursorImage) delete cursorImage;
+                    cursorImage = Image::FromFile(berryPath.c_str());
+                    cursorVisible = true;
+                }
+                break;
+            }
+        }
+    } else if (cmd == 5) PostQuitMessage(0);
 
     DestroyMenu(hMenu);
     saveData();
+}
+
+bool isCursorOverBulbasaur() {
+    POINT cursor; GetCursorPos(&cursor);
+    return cursor.x >= petPosition.x && cursor.x <= petPosition.x + (int)bulbasaur.current->width &&
+        cursor.y >= petPosition.y && cursor.y <= petPosition.y + (int)bulbasaur.current->height;
+}
+
+void handleFeeding() {
+    if (!selectedItemForFeeding.empty() && isCursorOverBulbasaur()) {
+        currentState = STATE_EAT;
+        bulbasaur.current = &bulbasaur.eat;
+        bulbasaur.current->currentFrame = 0;
+
+        bag[selectedItemForFeeding]--;
+        if (bag[selectedItemForFeeding] <= 0)
+            bag.erase(selectedItemForFeeding);
+
+        std::wstring eatPath = L"assets\\berries\\" +
+            std::wstring(selectedItemForFeeding.begin(), selectedItemForFeeding.end()) +
+            L"-eat.gif";
+
+        if (cursorImage) delete cursorImage;
+        cursorImage = Image::FromFile(eatPath.c_str());
+
+        selectedItemForFeeding.clear();
+    }
+}
+
+void trySpawnItem() {
+    if (!exploreMode) return;
+    int chance = rand() % 400;
+    if (chance < 2 && currentState != STATE_FINDITEM) {
+        std::vector<std::string> items = { "oran-berry", "sitrus-berry", "pecha-berry", "pokeball" };
+        std::string item = items[rand() % items.size()];
+        bag[item]++;
+        currentState = STATE_FINDITEM;
+        bulbasaur.current = &bulbasaur.findItem;
+        bulbasaur.current->currentFrame = 0;
+    }
 }
 
 void renderPokemon(HWND hwnd) {
@@ -171,12 +303,12 @@ void renderPokemon(HWND hwnd) {
     HGDIOBJ oldBmp = SelectObject(mem, bmp);
 
     Graphics g(mem);
-    g.Clear(Color(0,0,0,0));
+    g.Clear(Color(0, 0, 0, 0));
     g.DrawImage(pg->img, 0.0f, 0.0f, pg->width, pg->height);
 
-    POINT ptDest = {petPosition.x, petPosition.y};
-    SIZE sizeWnd = {(LONG)pg->width, (LONG)pg->height};
-    POINT ptSrc = {0,0};
+    POINT ptDest = { petPosition.x, petPosition.y };
+    SIZE sizeWnd = { (LONG)pg->width, (LONG)pg->height };
+    POINT ptSrc = { 0,0 };
 
     BLENDFUNCTION blend{};
     blend.BlendOp = AC_SRC_OVER;
@@ -193,183 +325,130 @@ void renderPokemon(HWND hwnd) {
 
 LRESULT CALLBACK PetProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
-        case WM_CREATE:
-            SetTimer(hwnd, 1, baseTimerSpeed, NULL);
-            srand((unsigned)time(NULL));
-            lastInteraction = GetTickCount();
-            return 0;
+    case WM_CREATE:
+        SetTimer(hwnd, 1, baseTimerSpeed, NULL);
+        srand((unsigned)time(NULL));
+        lastInteraction = GetTickCount();
+        return 0;
 
-        case WM_TIMER: {
-            DWORD now = GetTickCount();
+    case WM_TIMER: {
+        DWORD now = GetTickCount();
+        trySpawnItem();
+        handleFeeding();
 
-            if (!exploreMode && currentState == STATE_IDLE && (now - lastInteraction) > sleepTimeout) {
-                previousState = currentState;
-                currentState = STATE_SLEEP;
+        switch (currentState) {
+        case STATE_IDLE:
+            if (bulbasaur.current != &bulbasaur.idle) {
+                bulbasaur.current = &bulbasaur.idle;
+                bulbasaur.current->currentFrame = 0;
             }
-
-            switch (currentState) {
-                case STATE_IDLE:
-                    if (bulbasaur.current != &bulbasaur.idle) {
-                        bulbasaur.current = &bulbasaur.idle;
-                        bulbasaur.current->currentFrame = 0;
-                    }
-                    if (now - lastAnimationTime >= animIntervalIdle) {
-                        lastAnimationTime = now;
-                        advanceFrame(*bulbasaur.current);
-                        behaviorTimer++;
-                        if (behaviorTimer > (exploreMode ? 10 : 30)) {
-                            behaviorTimer = 0;
-                            if (rand() % (exploreMode ? 2 : 3) == 0) {
-                                currentState = STATE_WALK;
-                                movingRight = rand() % 2;
-                            }
-                        }
-                    }
-                    break;
-
-                case STATE_WALK:
-                    if (bulbasaur.current != (movingRight ? &bulbasaur.walkRight : &bulbasaur.walkLeft)) {
-                        bulbasaur.current = movingRight ? &bulbasaur.walkRight : &bulbasaur.walkLeft;
-                        bulbasaur.current->currentFrame = 0;
-                    }
-                    if (now - lastAnimationTime >= animIntervalWalk) {
-                        lastAnimationTime = now;
-                        advanceFrame(*bulbasaur.current);
-
-                        // Move pet
-                        petPosition.x += movingRight ? moveSpeed : -moveSpeed;
-                        if (petPosition.x < 0) { petPosition.x = 0; movingRight = true; }
-                        if (petPosition.x + bulbasaur.current->width > GetSystemMetrics(SM_CXSCREEN)) {
-                            petPosition.x = (int)(GetSystemMetrics(SM_CXSCREEN) - bulbasaur.current->width);
-                            movingRight = false;
-                        }
-                        behaviorTimer++;
-                        if (behaviorTimer > (exploreMode ? 15 : 30)) {
-                            behaviorTimer = 0;
-                            currentState = STATE_IDLE;
-                        }
-                    }
-                    break;
-
-                case STATE_SLEEP: {
-                    PokemonGIF* targetSleep = movingRight ? &bulbasaur.sleepRight : &bulbasaur.sleepLeft;
-                    if (bulbasaur.current != targetSleep) {
-                        bulbasaur.current = targetSleep;
-                        bulbasaur.current->currentFrame = 0;
-                    }
-                    if (now - lastAnimationTime >= animIntervalSleep) {
-                        lastAnimationTime = now;
-                        advanceFrame(*bulbasaur.current);
-                    }
-                    break;
-                }
-
-                case STATE_WAKE:
-                    if (bulbasaur.current != (movingRight ? &bulbasaur.wakeRight : &bulbasaur.wakeLeft)) {
-                        bulbasaur.current = movingRight ? &bulbasaur.wakeRight : &bulbasaur.wakeLeft;
-                        bulbasaur.current->currentFrame = 0;
-                    }
-                    if (now - lastAnimationTime >= animIntervalWake) {
-                        lastAnimationTime = now;
-                        if (advanceFrame(*bulbasaur.current)) {
-                            currentState = exploreMode ? STATE_WALK : STATE_IDLE;
-                            bulbasaur.current = &bulbasaur.idle;
-                        }
-                    }
-                    break;
-
-                case STATE_TRIP:
-                    if (bulbasaur.current != (movingRight ? &bulbasaur.tripRight : &bulbasaur.tripLeft)) {
-                        bulbasaur.current = movingRight ? &bulbasaur.tripRight : &bulbasaur.tripLeft;
-                        bulbasaur.current->currentFrame = 0;
-                        behaviorTimer = 0;
-                    }
-                    if (now - lastAnimationTime >= animIntervalTrip) {
-                        lastAnimationTime = now;
-                        if (advanceFrame(*bulbasaur.current)) {
-                            currentState = STATE_IDLE;
-                            bulbasaur.current = &bulbasaur.idle;
-                        }
-                    }
-                    break;
-            }
-
-            renderPokemon(hwnd);
-            SetWindowPos(hwnd, HWND_TOPMOST, petPosition.x, petPosition.y, 0, 0,
-                         SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-            saveData();
-            return 0;
-        }
-
-        case WM_LBUTTONDOWN:
-            lastInteraction = GetTickCount();
-            if (currentState == STATE_IDLE) {
-                previousState = STATE_IDLE;
-                movingRight = rand() % 2; // random nudge direction
-                currentState = STATE_WALK;
-            } else if (currentState == STATE_WALK) {
-                currentState = STATE_TRIP; // trip when clicked while walking
+            if (now - lastAnimationTime >= animIntervalIdle) {
+                lastAnimationTime = now;
+                advanceFrame(*bulbasaur.current);
             }
             break;
 
-        case WM_RBUTTONDOWN:
-            ShowRightClickMenu(hwnd);
-            return 0;
+        case STATE_WALK:
+            if (bulbasaur.current != (movingRight ? &bulbasaur.walkRight : &bulbasaur.walkLeft)) {
+                bulbasaur.current = movingRight ? &bulbasaur.walkRight : &bulbasaur.walkLeft;
+                bulbasaur.current->currentFrame = 0;
+            }
+            if (now - lastAnimationTime >= animIntervalWalk) {
+                lastAnimationTime = now;
+                advanceFrame(*bulbasaur.current);
+                petPosition.x += movingRight ? moveSpeed : -moveSpeed;
+            }
+            break;
 
-        case WM_APP + 1:
-            if (lParam == WM_RBUTTONUP)
-                ShowRightClickMenu(hwnd);
-            return 0;
+        case STATE_FINDITEM:
+            if (now - lastAnimationTime >= animIntervalFindItem) {
+                lastAnimationTime = now;
+                bool done = advanceFrame(*bulbasaur.current);
+                if (done) currentState = STATE_IDLE;
+            }
+            break;
 
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
+        case STATE_EAT:
+            if (now - lastAnimationTime >= animIntervalEat) {
+                lastAnimationTime = now;
+                bool done = advanceFrame(*bulbasaur.current);
+                if (done) {
+                    currentState = STATE_IDLE;
+                    if (cursorImage) { delete cursorImage; cursorImage = nullptr; }
+                    ShowWindow(hwndCursorOverlay, SW_HIDE);
+                    cursorVisible = false;
+                }
+            }
+            break;
+        }
+
+        renderPokemon(hwnd);
+        if (cursorVisible) renderCursorOverlay();
+        SetWindowPos(hwnd, HWND_TOPMOST, petPosition.x, petPosition.y, 0, 0,
+            SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        saveData();
+        return 0;
+    }
+
+    case WM_LBUTTONDOWN:
+        lastInteraction = GetTickCount();
+        if (currentState == STATE_IDLE) {
+            currentState = STATE_WALK;
+            movingRight = rand() % 2;
+        }
+        break;
+
+    case WM_RBUTTONDOWN:
+        ShowRightClickMenu(hwnd);
+        return 0;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
-    GdiplusStartupInput gdiplusStartupInput;
-    GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+    GdiplusStartupInput gsi;
+    GdiplusStartup(&gdiplusToken, &gsi, NULL);
 
     loadData();
     loadBulbasaur();
 
     if (petPosition.x == -1 || petPosition.y == -1) {
-        RECT taskbarRect;
+        RECT r;
         HWND taskbar = FindWindow(L"Shell_TrayWnd", NULL);
-        GetWindowRect(taskbar, &taskbarRect);
-        petPosition.x = taskbarRect.right - (int)bulbasaur.current->width - 80;
-        int taskbarHeight = taskbarRect.bottom - taskbarRect.top;
-        petPosition.y = taskbarRect.top + taskbarHeight - (int)bulbasaur.current->height + 2;
+        GetWindowRect(taskbar, &r);
+        petPosition.x = r.right - (int)bulbasaur.current->width - 80;
+        int h = r.bottom - r.top;
+        petPosition.y = r.top + h - (int)bulbasaur.current->height + 2;
         saveData();
     }
 
-    WNDCLASS wcPet{};
-    wcPet.lpfnWndProc = PetProc;
-    wcPet.hInstance = hInst;
-    wcPet.lpszClassName = L"PetWindow";
-    wcPet.hCursor = LoadCursor(NULL, IDC_ARROW);
-    RegisterClass(&wcPet);
+    WNDCLASS wc{};
+    wc.lpfnWndProc = PetProc;
+    wc.hInstance = hInst;
+    wc.lpszClassName = L"PetWindow";
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClass(&wc);
 
-    HWND hwndPet = CreateWindowEx(
-        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-        L"PetWindow", L"PokeBuddy", WS_POPUP,
-        petPosition.x, petPosition.y,
-        (int)bulbasaur.current->width,
-        (int)bulbasaur.current->height,
-        NULL, NULL, hInst, NULL
-    );
+    HWND hwnd = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        L"PetWindow", L"PokeBuddy", WS_POPUP, petPosition.x, petPosition.y,
+        (int)bulbasaur.current->width, (int)bulbasaur.current->height,
+        NULL, NULL, hInst, NULL);
 
-    ShowWindow(hwndPet, SW_SHOW);
-    UpdateWindow(hwndPet);
+    CreateCursorOverlay(hInst);
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
 
     nid.cbSize = sizeof(nid);
-    nid.hWnd = hwndPet;
+    nid.hWnd = hwnd;
     nid.uID = 1;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = WM_APP + 1;
-    HICON hIcon = (HICON)LoadImage(NULL, L"assets\\tray-icon.ico", IMAGE_ICON, 0, 0, LR_LOADFROMFILE);
+    HICON hIcon = (HICON)LoadImage(NULL, L"assets\\pokeball.ico", IMAGE_ICON, 0, 0, LR_LOADFROMFILE);
     if (hIcon) nid.hIcon = hIcon;
     wcscpy_s(nid.szTip, ARRAYSIZE(nid.szTip), L"PokeBuddy");
     Shell_NotifyIcon(NIM_ADD, &nid);

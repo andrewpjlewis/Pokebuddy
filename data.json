@@ -1,6 +1,12 @@
 {
+    "bag": {
+        "oran-berry": 23,
+        "pecha-berry": 17,
+        "pokeball": 31,
+        "sitrus-berry": 30
+    },
     "exploreMode": false,
     "pokemon": "bulbasaur",
-    "posX": 1816,
+    "posX": 1208,
     "posY": 1016
 }
