@@ -33,10 +33,7 @@ struct BulbasaurSet {
     PokemonGIF sleepLeft, sleepRight;
     PokemonGIF wakeLeft, wakeRight;
     PokemonGIF tripLeft, tripRight;
-    PokemonGIF painLeft, painRight;
-    PokemonGIF tumbleBack;
     PokemonGIF pullUp;
-    PokemonGIF lostBalanceUp;
     PokemonGIF* current = nullptr;
 };
 
@@ -45,10 +42,7 @@ enum PetState {
     STATE_WALK,
     STATE_SLEEP,
     STATE_WAKE,
-    STATE_PAIN,
     STATE_PULLUP,
-    STATE_LOSTBALANCE,
-    STATE_TUMBLEBACK,
     STATE_TRIP
 };
 
@@ -65,14 +59,15 @@ int behaviorTimer = 0;
 DWORD lastInteraction = 0;
 DWORD sleepTimeout = 0.25 * 60 * 1000; // 15 seconds
 int moveSpeed = 8;
+int nudgeDistance = 50; // pixels to move on left-click
 UINT baseTimerSpeed = 16; // smooth
 
 DWORD lastAnimationTime = 0;
 UINT animIntervalIdle = 250;
 UINT animIntervalWalk = 150;
 UINT animIntervalSleep = 800;
-UINT animIntervalPain = 100;
 UINT animIntervalWake = 150;
+UINT animIntervalTrip = 200;
 
 PetState currentState = STATE_IDLE;
 PetState previousState = STATE_IDLE;
@@ -101,21 +96,17 @@ bool advanceFrame(PokemonGIF& pg) {
 
 void loadBulbasaur() {
     std::wstring base = L"assets\\";
-    bulbasaur.idle             = loadGifSafe(base + L"bulbasaur-idle.gif");
-    bulbasaur.walkLeft         = loadGifSafe(base + L"bulbasaur-walk-left.gif");
-    bulbasaur.walkRight        = loadGifSafe(base + L"bulbasaur-walk-right.gif");
-    bulbasaur.sleepLeft        = loadGifSafe(base + L"bulbasaur-sleep-left.gif");
-    bulbasaur.sleepRight       = loadGifSafe(base + L"bulbasaur-sleep-right.gif");
-    bulbasaur.wakeLeft         = loadGifSafe(base + L"bulbasaur-wake-left.gif");
-    bulbasaur.wakeRight        = loadGifSafe(base + L"bulbasaur-wake-right.gif");
-    bulbasaur.tripLeft         = loadGifSafe(base + L"bulbasaur-trip-left.gif");
-    bulbasaur.tripRight        = loadGifSafe(base + L"bulbasaur-trip-right.gif");
-    bulbasaur.painLeft         = loadGifSafe(base + L"bulbasaur-pain-left.gif");
-    bulbasaur.painRight        = loadGifSafe(base + L"bulbasaur-pain-right.gif");
-    bulbasaur.tumbleBack       = loadGifSafe(base + L"bulbasaur-tumple-back.gif");
-    bulbasaur.pullUp           = loadGifSafe(base + L"bulbasaur-pull-up.gif");
-    bulbasaur.lostBalanceUp    = loadGifSafe(base + L"bulbasaur-lostbalance-up.gif");
-    bulbasaur.current = &bulbasaur.idle;
+    bulbasaur.idle       = loadGifSafe(base + L"bulbasaur-idle.gif");
+    bulbasaur.walkLeft   = loadGifSafe(base + L"bulbasaur-walk-left.gif");
+    bulbasaur.walkRight  = loadGifSafe(base + L"bulbasaur-walk-right.gif");
+    bulbasaur.sleepLeft  = loadGifSafe(base + L"bulbasaur-sleep-left.gif");
+    bulbasaur.sleepRight = loadGifSafe(base + L"bulbasaur-sleep-right.gif");
+    bulbasaur.wakeLeft   = loadGifSafe(base + L"bulbasaur-wake-left.gif");
+    bulbasaur.wakeRight  = loadGifSafe(base + L"bulbasaur-wake-right.gif");
+    bulbasaur.tripLeft   = loadGifSafe(base + L"bulbasaur-trip-left.gif");
+    bulbasaur.tripRight  = loadGifSafe(base + L"bulbasaur-trip-right.gif");
+    bulbasaur.pullUp     = loadGifSafe(base + L"bulbasaur-pull-up.gif");
+    bulbasaur.current    = &bulbasaur.idle;
 }
 
 void loadData() {
@@ -159,7 +150,7 @@ void ShowRightClickMenu(HWND hwnd) {
         case 3: MessageBox(hwnd, L"Your Pokemon is healed!", L"Heal", MB_OK); break;
         case 4: MessageBox(hwnd, L"Switching Pokemon...", L"Switch Pokemon", MB_OK); break;
         case 5:
-            petPosition.x = GetSystemMetrics(SM_CXSCREEN) - (int)bulbasaur.current->width - 100;
+            petPosition.x = GetSystemMetrics(SM_CXSCREEN) - (int)bulbasaur.current->width - 200;
             movingRight = false;
             MessageBox(hwnd, L"Bulbasaur found!", L"Find Bulbasaur", MB_OK);
             break;
@@ -168,17 +159,6 @@ void ShowRightClickMenu(HWND hwnd) {
 
     DestroyMenu(hMenu);
     saveData();
-}
-
-void positionOnTaskbar() {
-    HWND taskbar = FindWindow(L"Shell_TrayWnd", NULL);
-    if (!taskbar) return;
-
-    RECT tbRect;
-    GetWindowRect(taskbar, &tbRect);
-
-    petPosition.x = tbRect.right - (int)bulbasaur.current->width - 50;
-    petPosition.y = tbRect.top; // aligns with taskbar top
 }
 
 void renderPokemon(HWND hwnd) {
@@ -217,7 +197,6 @@ LRESULT CALLBACK PetProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             SetTimer(hwnd, 1, baseTimerSpeed, NULL);
             srand((unsigned)time(NULL));
             lastInteraction = GetTickCount();
-            positionOnTaskbar();
             return 0;
 
         case WM_TIMER: {
@@ -226,8 +205,6 @@ LRESULT CALLBACK PetProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (!exploreMode && currentState == STATE_IDLE && (now - lastInteraction) > sleepTimeout) {
                 previousState = currentState;
                 currentState = STATE_SLEEP;
-                bulbasaur.current = movingRight ? &bulbasaur.sleepRight : &bulbasaur.sleepLeft;
-                bulbasaur.current->currentFrame = 0;
             }
 
             switch (currentState) {
@@ -258,6 +235,8 @@ LRESULT CALLBACK PetProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     if (now - lastAnimationTime >= animIntervalWalk) {
                         lastAnimationTime = now;
                         advanceFrame(*bulbasaur.current);
+
+                        // Move pet
                         petPosition.x += movingRight ? moveSpeed : -moveSpeed;
                         if (petPosition.x < 0) { petPosition.x = 0; movingRight = true; }
                         if (petPosition.x + bulbasaur.current->width > GetSystemMetrics(SM_CXSCREEN)) {
@@ -272,12 +251,18 @@ LRESULT CALLBACK PetProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                     break;
 
-                case STATE_SLEEP:
+                case STATE_SLEEP: {
+                    PokemonGIF* targetSleep = movingRight ? &bulbasaur.sleepRight : &bulbasaur.sleepLeft;
+                    if (bulbasaur.current != targetSleep) {
+                        bulbasaur.current = targetSleep;
+                        bulbasaur.current->currentFrame = 0;
+                    }
                     if (now - lastAnimationTime >= animIntervalSleep) {
                         lastAnimationTime = now;
                         advanceFrame(*bulbasaur.current);
                     }
                     break;
+                }
 
                 case STATE_WAKE:
                     if (bulbasaur.current != (movingRight ? &bulbasaur.wakeRight : &bulbasaur.wakeLeft)) {
@@ -293,15 +278,17 @@ LRESULT CALLBACK PetProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     }
                     break;
 
-                case STATE_PAIN:
-                    if (bulbasaur.current != (movingRight ? &bulbasaur.painRight : &bulbasaur.painLeft)) {
-                        bulbasaur.current = movingRight ? &bulbasaur.painRight : &bulbasaur.painLeft;
+                case STATE_TRIP:
+                    if (bulbasaur.current != (movingRight ? &bulbasaur.tripRight : &bulbasaur.tripLeft)) {
+                        bulbasaur.current = movingRight ? &bulbasaur.tripRight : &bulbasaur.tripLeft;
                         bulbasaur.current->currentFrame = 0;
+                        behaviorTimer = 0;
                     }
-                    if (now - lastAnimationTime >= animIntervalPain) {
+                    if (now - lastAnimationTime >= animIntervalTrip) {
                         lastAnimationTime = now;
                         if (advanceFrame(*bulbasaur.current)) {
-                            currentState = previousState;
+                            currentState = STATE_IDLE;
+                            bulbasaur.current = &bulbasaur.idle;
                         }
                     }
                     break;
@@ -316,18 +303,14 @@ LRESULT CALLBACK PetProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_LBUTTONDOWN:
             lastInteraction = GetTickCount();
-            if (currentState == STATE_SLEEP) {
-                previousState = STATE_SLEEP;
-                currentState = STATE_WAKE;
-                bulbasaur.current = movingRight ? &bulbasaur.wakeRight : &bulbasaur.wakeLeft;
-                bulbasaur.current->currentFrame = 0;
-            } else {
-                previousState = currentState;
-                currentState = STATE_PAIN;
-                bulbasaur.current = movingRight ? &bulbasaur.painRight : &bulbasaur.painLeft;
-                bulbasaur.current->currentFrame = 0;
+            if (currentState == STATE_IDLE) {
+                previousState = STATE_IDLE;
+                movingRight = rand() % 2; // random nudge direction
+                currentState = STATE_WALK;
+            } else if (currentState == STATE_WALK) {
+                currentState = STATE_TRIP; // trip when clicked while walking
             }
-            return 0;
+            break;
 
         case WM_RBUTTONDOWN:
             ShowRightClickMenu(hwnd);
@@ -353,7 +336,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     loadBulbasaur();
 
     if (petPosition.x == -1 || petPosition.y == -1) {
-        positionOnTaskbar();
+        RECT taskbarRect;
+        HWND taskbar = FindWindow(L"Shell_TrayWnd", NULL);
+        GetWindowRect(taskbar, &taskbarRect);
+        petPosition.x = taskbarRect.right - (int)bulbasaur.current->width - 80;
+        int taskbarHeight = taskbarRect.bottom - taskbarRect.top;
+        petPosition.y = taskbarRect.top + taskbarHeight - (int)bulbasaur.current->height + 2;
         saveData();
     }
 
